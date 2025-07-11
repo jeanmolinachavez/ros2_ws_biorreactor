@@ -28,6 +28,9 @@
 char ssid[] = "ESP_UCN";
 char password[] = "3sp32UCN@";
 
+// Llave única por dispositivo esp32 para conexión con micro-ROS
+#define CLIENT_KEY 0xAAAA0001
+
 // IP del agente ROS y puerto UDP (PC con ROS 2)
 char agent_ip[] = "192.168.31.200";
 size_t agent_port = 8888;
@@ -159,15 +162,27 @@ void setup() {
   // Inicializar sensores
   sensors.begin();
 
-  // Inicializar micro-ROS
+  // Asignar allocator
   allocator = rcl_get_default_allocator();
-  rclc_support_init(&support, 0, NULL, &allocator);
+
+  // Inicializar opciones y contexto
+  rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+  rcl_init_options_init(&init_options, allocator);
+
+  // Obtener opciones RMW
+  rmw_init_options_t* rmw_options = rcl_init_options_get_rmw_init_options(&init_options);
+  rmw_uros_options_set_client_key(CLIENT_KEY, rmw_options);
+
+  // Inicializar soporte con opciones
+  rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator);
+
+  // Inicializar nodo, publisher, timer y executor
   rclc_node_init_default(&node, "nodo_esp32_01", "", &support);
   rclc_publisher_init_default(&publisher, &node,
-                              ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-                              "datos_sensores");
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+    "datos_sensores");
 
-  rclc_timer_init_default(&timer, &support, RCL_MS_TO_NS(30000), timer_callback); // cada 30 segundos
+  rclc_timer_init_default(&timer, &support, RCL_MS_TO_NS(30000), timer_callback);
   rclc_executor_init(&executor, &support.context, 1, &allocator);
   rclc_executor_add_timer(&executor, &timer);
 }
