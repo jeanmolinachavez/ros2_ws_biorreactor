@@ -21,6 +21,8 @@ setup(
     entry_points={
         'console_scripts': [
             'nodo_central = nodo_central_ros.nodo_central:main',
+            'nodo_exterior = nodo_central_ros.nodo_exterior:main',
+            'nodo_arduino_serial = nodo_central_ros.nodo_arduino_serial:main',
         ],
     },
 )
