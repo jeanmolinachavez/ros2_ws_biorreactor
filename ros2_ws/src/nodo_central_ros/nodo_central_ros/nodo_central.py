@@ -1,34 +1,70 @@
-import rclpy
+import rclpy  # Cliente ROS 2 para Python
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String  # Mensajes tipo String (JSON en este caso)
 import json
-import requests
+import requests  # Para enviar HTTP POST
 from datetime import datetime
+from collections import defaultdict  # Para agrupar datos por id_dispositivo
+import statistics  # Para calcular medianas
 
+# URL de la API donde se publican los datos filtrados
 API_URL = "https://biorreactor-app-api.onrender.com/api/sensores"
 
-def safe_format(value):
+# Función para formatear valores numéricos con 2 decimales, o "N/A" si no válido
+def formato_seguro(value):
     return f"{value:.2f}" if isinstance(value, (int, float)) else "N/A"
 
+# Función para calcular la mediana de un campo numérico dentro de una lista de diccionarios
+def calcular_mediana(buffer, campo):
+    try:
+        valores = [d[campo] for d in buffer if campo in d and isinstance(d[campo], (int, float))]
+        if not valores:
+            return None
+        return statistics.median(sorted(valores))
+    except Exception:
+        return None
+
+# Función para redondear valores numéricos a 2 decimales, o devuelve None
+def redondear(valor):
+    return round(valor, 2) if isinstance(valor, (int, float)) else None
+
+# Clase del nodo central
 class NodoCentral(Node):
     def __init__(self):
         super().__init__('nodo_central')
+
+        # Suscripción al topic "datos_sensores" con mensajes tipo String
         self.subscription = self.create_subscription(
             String,
             'datos_sensores',
             self.listener_callback,
             10
         )
-        self.datos_por_dispositivo = {}  # Almacena últimos datos por dispositivo
-        self.timer = self.create_timer(60.0, self.publicar_datos)  # Ejecuta cada 60 segundos
+        # Diccionario con una lista de datos por id_dispositivo
+        self.buffers_por_dispositivo = defaultdict(list)  # Cada dispositivo tiene su lista de datos
+        
+        # Timer que se ejecuta cada 60 segundos para intentar publicar si es el momento
+        self.timer = self.create_timer(60.0, self.publicar_datos)
 
     def listener_callback(self, msg):
         try:
             data = json.loads(msg.data)
             id_disp = data.get("id_dispositivo")
             if id_disp:
-                self.datos_por_dispositivo[id_disp] = (data, datetime.now())
-                #self.get_logger().info(f"✅ Dato recibido de {id_disp}")
+                self.buffers_por_dispositivo[id_disp].append(data)
+
+                # Log de los datos recibidos
+                self.get_logger().info(
+                    f"✅ Dato recibido de {id_disp}:\n"
+                    f"🆔 ID: {id_disp} | "
+                    f"🌡️ Temperatura: {formato_seguro(data.get('temperatura'))} °C | "
+                    f"🌊 pH: {formato_seguro(data.get('ph'))} | "
+                    f"⚡ Voltaje pH: = {formato_seguro(data.get('voltaje_ph'))} V | "
+                    f"🧪 Turbidez: {formato_seguro(data.get('turbidez'))} % | "
+                    f"🫁 Oxígeno: {formato_seguro(data.get('oxigeno'))} % | "
+                    f"⚡ Conductividad: {formato_seguro(data.get('conductividad'))} ppm | "
+                    f"🌐 Dominio: {data.get('dominio')}\n"
+                )
             else:
                 self.get_logger().warn("⚠️ Mensaje recibido sin 'id_dispositivo'")
         except json.JSONDecodeError:
@@ -41,36 +77,48 @@ class NodoCentral(Node):
         ahora = datetime.now()
         minuto = ahora.minute
 
+        # Solo publica en el minuto 0 o 30
         if minuto in [0, 30]:
-            self.get_logger().info(f"⏱️ Verificando datos a las {ahora.strftime('%H:%M')}")
+            self.get_logger().info(f"⏱️ Publicación datos medianos a las {ahora.strftime('%H:%M')}")
 
-            for id_disp, (json_data, hora) in self.datos_por_dispositivo.items():
-                tiempo_dato = (ahora - hora).total_seconds()
+            for id_disp, buffer in self.buffers_por_dispositivo.items():
+                if not buffer:
+                    continue
 
-                if tiempo_dato < 300:
-                    try:
-                        response = requests.post(API_URL, json=json_data, timeout=5)
-                        if response.status_code == 201:
-                            self.get_logger().info(f"[{ahora.strftime('%H:%M')}] ✅ Datos de {id_disp} enviados correctamente")
-                        else:
-                            self.get_logger().warn(f"[{ahora.strftime('%H:%M')}] ⚠️ Error al enviar {id_disp}: {response.status_code} - {response.text}")
-                    except requests.RequestException as e:
-                        self.get_logger().error(f"❌ Error al enviar datos de {id_disp}: {e}")
+                # Prepara el diccionario de datos a enviar
+                datos_filtrados = {
+                    "id_dispositivo": id_disp,
+                    "dominio": buffer[-1].get("dominio", "desconocido"),
+                    "temperatura": redondear(calcular_mediana(buffer, "temperatura")),
+                    "ph": redondear(calcular_mediana(buffer, "ph")),
+                    "turbidez": redondear(calcular_mediana(buffer, "turbidez")),
+                    "oxigeno": redondear(calcular_mediana(buffer, "oxigeno")),
+                    "conductividad": redondear(calcular_mediana(buffer, "conductividad")),
+                }
 
-                    self.get_logger().info(
-                        f"{id_disp} | "
-                        f"Dominio: {json_data.get('dominio')} | "
-                        f"🌡️ Temp: {safe_format(json_data.get('temperatura'))} | "
-                        f"pH: {safe_format(json_data.get('ph'))} | "
-                        f"🫁 Oxígeno: {safe_format(json_data.get('oxigeno'))} | "
-                        f"🧪 Turbidez: {safe_format(json_data.get('turbidez'))} | "
-                        f"⚡ Conductividad: {safe_format(json_data.get('conductividad'))}"
-                    )
-                else:
-                    self.get_logger().warn(f"[{ahora.strftime('%H:%M')}] ❌ Dato de {id_disp} demasiado antiguo ({int(tiempo_dato)}s). No se publica.")
-        #else:
-        #    self.get_logger().debug(f"[{ahora.strftime('%H:%M')}] Esperando próximo intervalo de publicación...")
+                # Envío HTTP POST a la API
+                try:
+                    response = requests.post(API_URL, json=datos_filtrados, timeout=5)
+                    if response.status_code == 201:
+                        self.get_logger().info(f"[{ahora.strftime('%H:%M')}] ✅ Datos de {id_disp} enviados")
+                    else:
+                        self.get_logger().warn(f"[{ahora.strftime('%H:%M')}] ⚠️ Error al enviar {id_disp}: {response.status_code} - {response.text}")
+                except requests.RequestException as e:
+                    self.get_logger().error(f"❌ Error al enviar datos de {id_disp}: {e}")
 
+                # Mostrar por consola lo enviado
+                self.get_logger().info(
+                    f"🆔 {id_disp} | Temperatura: {formato_seguro(datos_filtrados['temperatura'])}°C | "
+                    f"pH: {formato_seguro(datos_filtrados['ph'])} | Turbidez: {formato_seguro(datos_filtrados['turbidez'])}% | "
+                    f"Oxígeno: {formato_seguro(datos_filtrados['oxigeno'])}% | Conductividad: {formato_seguro(datos_filtrados['conductividad'])}ppm"
+                )
+
+                # Limpia el buffer para ese dispositivo después de publicar
+                self.buffers_por_dispositivo[id_disp] = []
+        else:
+            self.get_logger().debug(f"[{ahora.strftime('%H:%M')}] ⏳ Esperando próximo intervalo de publicación......")
+
+# Función principal del nodo
 def main(args=None):
     rclpy.init(args=args)
     nodo = NodoCentral()
@@ -80,5 +128,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
-
